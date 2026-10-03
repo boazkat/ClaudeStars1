@@ -27,7 +27,7 @@ CACHE = "data/stars_50pc_tycho2_2mass_gaia.csv"
 QUERY = """
 SELECT g.source_id, g.parallax, g.parallax_error, g.ruwe, g.phot_g_mean_mag,
        t.id AS tycho_id, t.hip, t.bt_mag, t.vt_mag, t.e_bt_mag, t.e_vt_mag,
-       tm.ks_m, tm.ks_msigcom, tm.ph_qual
+       tm.designation AS tmass_id, tm.ks_m, tm.ks_msigcom, tm.ph_qual
 FROM gaiadr3.gaia_source AS g
 JOIN gaiadr3.tycho2tdsc_merge_best_neighbour AS tx
      ON tx.source_id = g.source_id
@@ -52,37 +52,46 @@ def _col(tab, *names):
     raise KeyError(f"none of {names} in table columns {tab.colnames}")
 
 
-def fetch(refresh=False):
-    if os.path.exists(CACHE) and not refresh:
-        return Table.read(CACHE, format="ascii.csv")
+def tap_query(query, poll=20):
+    """Run an ADQL query as an asynchronous job on the Gaia archive.
+
+    The synchronous endpoint's statement timeout is too short for this query.
+    """
+    import io
     import time
     import requests
-    # Asynchronous TAP job: the sync endpoint's statement timeout is too short.
     r = requests.post(TAP + "/async",
                       data=dict(REQUEST="doQuery", LANG="ADQL", FORMAT="csv",
-                                PHASE="RUN", QUERY=QUERY),
-                      allow_redirects=False, timeout=60)
+                                PHASE="RUN", QUERY=query),
+                      allow_redirects=False, timeout=120)
     r.raise_for_status()
     job = r.headers["Location"]
+    print(f"Gaia archive job: {job}", flush=True)
+    t0 = time.time()
     while True:
+        time.sleep(poll)
         try:
             phase = requests.get(job + "/phase", timeout=120).text.strip()
         except requests.exceptions.RequestException as exc:
-            print(f"polling failed ({exc}); retrying")
-            time.sleep(15)
+            print(f"  polling failed ({exc}); retrying", flush=True)
             continue
-        print(f"Gaia archive job {job.rsplit('/', 1)[-1]}: {phase}")
+        print(f"  {time.time() - t0:5.0f} s  {phase}", flush=True)
         if phase == "COMPLETED":
             break
         if phase in ("ERROR", "ABORTED"):
-            raise RuntimeError(requests.get(job + "/error", timeout=60).text)
-        time.sleep(15)
-    res = requests.get(job + "/results/result", timeout=600)
+            raise RuntimeError(requests.get(job + "/error", timeout=120).text)
+    res = requests.get(job + "/results/result", timeout=900)
     res.raise_for_status()
+    return Table.read(io.BytesIO(res.content), format="csv")
+
+
+def fetch(refresh=False):
+    if os.path.exists(CACHE) and not refresh:
+        return Table.read(CACHE, format="ascii.csv")
+    tab = tap_query(QUERY)
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
-    with open(CACHE, "w") as f:
-        f.write(res.text)
-    return Table.read(CACHE, format="ascii.csv")
+    tab.write(CACHE, format="ascii.csv", overwrite=True)
+    return tab
 
 
 def select(tab, max_plx_frac_err=0.1, max_ruwe=1.4, max_color_err=0.1):
