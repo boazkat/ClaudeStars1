@@ -63,7 +63,7 @@ def tap_query(query, poll=20):
     r = requests.post(TAP + "/async",
                       data=dict(REQUEST="doQuery", LANG="ADQL", FORMAT="csv",
                                 PHASE="RUN", QUERY=query),
-                      allow_redirects=False, timeout=120)
+                      allow_redirects=False, timeout=600)
     r.raise_for_status()
     job = r.headers["Location"]
     print(f"Gaia archive job: {job}", flush=True)
@@ -71,7 +71,7 @@ def tap_query(query, poll=20):
     while True:
         time.sleep(poll)
         try:
-            phase = requests.get(job + "/phase", timeout=120).text.strip()
+            phase = requests.get(job + "/phase", timeout=300).text.strip()
         except requests.exceptions.RequestException as exc:
             print(f"  polling failed ({exc}); retrying", flush=True)
             continue
