@@ -21,11 +21,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from astropy.table import Table
 
+TAP = "https://gea.esac.esa.int/tap-server/tap"
 CACHE = "data/stars_50pc_tycho2_2mass_gaia.csv"
 
 QUERY = """
 SELECT g.source_id, g.parallax, g.parallax_error, g.ruwe, g.phot_g_mean_mag,
-       t.*,
+       t.id AS tycho_id, t.hip, t.bt_mag, t.vt_mag, t.e_bt_mag, t.e_vt_mag,
        tm.ks_m, tm.ks_msigcom, tm.ph_qual
 FROM gaiadr3.gaia_source AS g
 JOIN gaiadr3.tycho2tdsc_merge_best_neighbour AS tx
@@ -54,12 +55,34 @@ def _col(tab, *names):
 def fetch(refresh=False):
     if os.path.exists(CACHE) and not refresh:
         return Table.read(CACHE, format="ascii.csv")
-    from astroquery.gaia import Gaia
-    Gaia.ROW_LIMIT = -1
-    tab = Gaia.launch_job_async(QUERY).get_results()
+    import time
+    import requests
+    # Asynchronous TAP job: the sync endpoint's statement timeout is too short.
+    r = requests.post(TAP + "/async",
+                      data=dict(REQUEST="doQuery", LANG="ADQL", FORMAT="csv",
+                                PHASE="RUN", QUERY=QUERY),
+                      allow_redirects=False, timeout=60)
+    r.raise_for_status()
+    job = r.headers["Location"]
+    while True:
+        try:
+            phase = requests.get(job + "/phase", timeout=120).text.strip()
+        except requests.exceptions.RequestException as exc:
+            print(f"polling failed ({exc}); retrying")
+            time.sleep(15)
+            continue
+        print(f"Gaia archive job {job.rsplit('/', 1)[-1]}: {phase}")
+        if phase == "COMPLETED":
+            break
+        if phase in ("ERROR", "ABORTED"):
+            raise RuntimeError(requests.get(job + "/error", timeout=60).text)
+        time.sleep(15)
+    res = requests.get(job + "/results/result", timeout=600)
+    res.raise_for_status()
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
-    tab.write(CACHE, format="ascii.csv", overwrite=True)
-    return tab
+    with open(CACHE, "w") as f:
+        f.write(res.text)
+    return Table.read(CACHE, format="ascii.csv")
 
 
 def select(tab, max_plx_frac_err=0.1, max_ruwe=1.4, max_color_err=0.1):
